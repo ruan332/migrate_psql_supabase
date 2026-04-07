@@ -600,16 +600,18 @@ def apply_schema(
     console.print(Panel("[bold]STAGE 3 — Aplicando Schema no Supabase[/bold]", style="blue"))
     errors: list = []
 
-    def exec_ddl(cur, sql: str, description: str):
+    def exec_ddl(cur, sql, description: str):
+        sqls = sql if isinstance(sql, list) else [sql]
         try:
-            cur.execute(sql)
+            for s in sqls:
+                cur.execute(s)
             dst_conn.commit()
             logger.info(f"✅  {description}")
         except Exception as exc:
             dst_conn.rollback()
             msg = str(exc).strip().replace("\n", " ")
             logger.warning(f"❌  {description}\n    [red]{msg}[/red]")
-            errors.append({"object": description, "error": msg, "sql": sql[:300]})
+            errors.append({"object": description, "error": msg, "sql": sqls[-1][:300]})
 
     with dst_conn.cursor() as cur:
 
@@ -660,7 +662,10 @@ def apply_schema(
             cols = ", ".join(f'"{c}"' for c in pk["columns"])
             exec_ddl(
                 cur,
-                f'ALTER TABLE {fqn} ADD CONSTRAINT "{pk["constraint_name"]}" PRIMARY KEY ({cols});',
+                [
+                    f'ALTER TABLE {fqn} DROP CONSTRAINT IF EXISTS "{pk["constraint_name"]}";',
+                    f'ALTER TABLE {fqn} ADD CONSTRAINT "{pk["constraint_name"]}" PRIMARY KEY ({cols});',
+                ],
                 f"PK {pk['constraint_name']} → {fqn}",
             )
 
@@ -671,7 +676,10 @@ def apply_schema(
             cols = ", ".join(f'"{c}"' for c in uc["columns"])
             exec_ddl(
                 cur,
-                f'ALTER TABLE {fqn} ADD CONSTRAINT "{uc["constraint_name"]}" UNIQUE ({cols});',
+                [
+                    f'ALTER TABLE {fqn} DROP CONSTRAINT IF EXISTS "{uc["constraint_name"]}";',
+                    f'ALTER TABLE {fqn} ADD CONSTRAINT "{uc["constraint_name"]}" UNIQUE ({cols});',
+                ],
                 f"UNIQUE {uc['constraint_name']} → {fqn}",
             )
 
@@ -681,7 +689,10 @@ def apply_schema(
             fqn = f'"{cc["schema_name"]}"."{cc["table_name"]}"'
             exec_ddl(
                 cur,
-                f'ALTER TABLE {fqn} ADD CONSTRAINT "{cc["constraint_name"]}" {cc["definition"]};',
+                [
+                    f'ALTER TABLE {fqn} DROP CONSTRAINT IF EXISTS "{cc["constraint_name"]}";',
+                    f'ALTER TABLE {fqn} ADD CONSTRAINT "{cc["constraint_name"]}" {cc["definition"]};',
+                ],
                 f"CHECK {cc['constraint_name']} → {fqn}",
             )
 
@@ -700,14 +711,20 @@ def apply_schema(
                 f'    FOREIGN KEY ({cols}) REFERENCES {ref_fqn} ({ref_cols})\n'
                 f'    ON UPDATE {on_upd} ON DELETE {on_del};'
             )
-            exec_ddl(cur, sql, f"FK {fk['constraint_name']} → {fqn}")
+            exec_ddl(cur, [
+                f'ALTER TABLE {fqn} DROP CONSTRAINT IF EXISTS "{fk["constraint_name"]}";',
+                sql,
+            ], f"FK {fk['constraint_name']} → {fqn}")
 
         # 9. Indexes
         console.print("\n[bold cyan]── Indexes[/bold cyan]")
         for idx in schema["indexes"]:
             exec_ddl(
                 cur,
-                f"{idx['indexdef']};",
+                [
+                    f'DROP INDEX IF EXISTS "{idx["schema_name"]}"."{ idx["indexname"]}";',
+                    f"{idx['indexdef']};",
+                ],
                 f"INDEX {idx['indexname']} → {idx['schema_name']}.{idx['table_name']}",
             )
 
