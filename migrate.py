@@ -206,7 +206,11 @@ def test_connections(config: dict, logger: logging.Logger) -> tuple:
     )
 
     logger.info("Conectando ao Supabase de destino...")
-    dst_conn = connect_with_retry(config["dest"], "destino", logger)
+    dst_conn = connect_with_retry(
+        {**config["dest"], "keepalives": 1, "keepalives_idle": 30,
+         "keepalives_interval": 10, "keepalives_count": 5},
+        "destino", logger,
+    )
     with dst_conn.cursor() as cur:
         cur.execute("SELECT version();")
         dst_version = cur.fetchone()[0].split(",")[0]
@@ -770,7 +774,7 @@ def _serialize_row(row: tuple) -> tuple:
     for val in row:
         if val is None:
             result.append(None)
-        elif isinstance(val, dict):
+        elif isinstance(val, (dict, list)):
             result.append(json.dumps(val, default=str))
         elif isinstance(val, memoryview):
             result.append(bytes(val))
@@ -815,7 +819,7 @@ def migrate_data(
     schema: dict,
     config: dict,
     logger: logging.Logger,
-) -> list:
+) -> tuple:
     console.print(Panel("[bold]STAGE 4 — Migrando Dados[/bold]", style="blue"))
 
     batch_size  = config["batch_size"]
@@ -834,6 +838,21 @@ def migrate_data(
         outer = progress.add_task("[bold cyan]Tabelas[/bold cyan]", total=len(table_order))
 
         for fqn in table_order:
+            # Reconnect destination if connection was dropped (e.g. long-running table)
+            if dst_conn.closed:
+                logger.warning("⚠  Conexão com destino perdida, reconectando...")
+                try:
+                    dst_conn = connect_with_retry(
+                        {**config["dest"], "keepalives": 1, "keepalives_idle": 30,
+                         "keepalives_interval": 10, "keepalives_count": 5},
+                        "destino", logger,
+                    )
+                    logger.info("✅  Reconectado ao destino.")
+                except Exception as exc:
+                    logger.error(f"❌  Não foi possível reconectar ao destino: {exc}")
+                    errors.append({"object": "RECONNECT", "error": str(exc), "sql": ""})
+                    break
+
             tbl = schema["tables"][fqn]
             quoted_fqn = f'"{tbl["schema"]}"."{tbl["name"]}"'
 
@@ -926,7 +945,7 @@ def migrate_data(
             progress.update(inner, completed=max(total_rows, 1))
             progress.advance(outer)
 
-    return errors
+    return errors, dst_conn
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -1078,7 +1097,7 @@ def main():
         schema_errors = apply_schema(dst_conn, schema, logger)
 
         # ── Stage 4 — Data ────────────────────────────────────
-        data_errors = migrate_data(src_conn, dst_conn, schema, config, logger)
+        data_errors, dst_conn = migrate_data(src_conn, dst_conn, schema, config, logger)
 
         # ── Stage 5 — Validation ──────────────────────────────
         validation_results, all_ok = validate(src_conn, dst_conn, schema, logger)
